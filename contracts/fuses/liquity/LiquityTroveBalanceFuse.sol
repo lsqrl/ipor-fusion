@@ -47,6 +47,8 @@ contract LiquityTroveBalanceFuse is IMarketBalanceFuse {
             collToken = IAddressesRegistry(registry).collToken();
             (collTokenPrice, collTokenPriceDecimals) = priceOracleMiddleware.getAssetPrice(collToken);
             uint256 idsLen = troveData.troveIds[registry].length;
+
+            // TODO: add popping mechanism in ids so that idsLen does not explode
             for(uint256 j; j < idsLen; ++j) {
                 uint256 troveId = troveData.idsByIndex[registry][j];
                 if (troveId == 0) continue;
@@ -54,6 +56,7 @@ contract LiquityTroveBalanceFuse is IMarketBalanceFuse {
                     troveManager.getLatestTroveData(troveId).entireColl * collTokenPrice,
                     IERC20Metadata(collToken).decimals() + collTokenPriceDecimals
                 );
+                // TODO: investigate with IPOR team or Liquity if we need to add interests here
             }
         }
 

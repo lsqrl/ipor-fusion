@@ -224,13 +224,13 @@ contract EbisuInterestRateDelegateTest is Test {
 
     function testSetDelegateAndAdjustInterestRate() public {
         // Step 1: Open a trove
-        (uint256 troveId, address troveOwner) = _openTroveForTesting();
+        (uint256 troveId, address troveOwner) = _openTroveForTesting(true);
+        assertEq(troveOwner, address(plasmaVault), "Trove owner should be PlasmaVault");
 
         // Step 2: Get BorrowerOperations and set delegate
         IBorrowerOperationsFull borrowerOpsFull = _getBorrowerOperations();
-        _setDelegate(borrowerOpsFull, troveId, troveOwner);
 
-        // Step 3: Verify delegate was set
+        // Step 3: Verify delegate was set by the fuse
         _verifyDelegateSet(borrowerOpsFull, troveId);
 
         // Step 4: Adjust interest rate using delegate wallet
@@ -291,7 +291,7 @@ contract EbisuInterestRateDelegateTest is Test {
      */
     function testExecutorCannotSetDelegateDirectly() public {
         // Step 1: Open a trove
-        (uint256 troveId, address troveOwner) = _openTroveForTesting();
+        (uint256 troveId, address troveOwner) = _openTroveForTesting(false);
 
         // Verify trove owner is PlasmaVault
         assertEq(troveOwner, address(plasmaVault), "Trove owner should be PlasmaVault");
@@ -338,66 +338,23 @@ contract EbisuInterestRateDelegateTest is Test {
      * 5. After trove is opened, executor can call setInterestIndividualDelegate() directly
      *    because _requireCallerIsBorrower() checks: msg.sender == owner OR msg.sender == AddManager
      */
-    function testExecutorCanSetDelegateWhenAddManagerIsSet() public {
-        address executorWallet = address(this);
-
-        // Step 1: Open a trove via PlasmaVault.execute()
-        // This will set addManager = msg.sender (executor wallet) inside the fuse
-        (uint256 troveId, address troveOwner) = _openTroveForTesting();
-
-        // Verify trove owner is PlasmaVault
+    function testFuseSetsDelegateEvenWhenAddManagerIsZapper() public {
+        (uint256 troveId, address troveOwner) = _openTroveForTesting(true);
         assertEq(troveOwner, address(plasmaVault), "Trove owner should be PlasmaVault");
 
-        // Step 2: Check what AddManager is actually set to
         IBorrowerOperationsFull borrowerOpsFull = _getBorrowerOperations();
+
+        _verifyDelegateSet(borrowerOpsFull, troveId);
+
         address addManager = borrowerOpsFull.addManagerOf(troveId);
+        assertTrue(addManager != address(0), "AddManager should be set");
+        assertTrue(addManager != address(plasmaVault), "AddManager is expected to be controlled by the zapper");
 
-        console.log("Trove ID:", troveId);
-        console.log("Trove owner (PlasmaVault):", troveOwner);
-        console.log("AddManager (actual):", addManager);
-        console.log("Executor wallet (address(this)):", executorWallet);
-        console.log("Zapper address:", SUSDE_ZAPPER);
-
-        // ISSUE DISCOVERED: The Zapper contract is overriding our addManager parameter
-        // and setting itself as the AddManager. This is because the Zapper calls
-        // BorrowerOperations.openTrove() internally, and msg.sender in that call is the Zapper.
-        //
-        // WORKAROUND: Since the Zapper is the AddManager, we need to either:
-        // 1. Use the Zapper's setAddManager function (if it exposes one) to change AddManager to executor
-        // 2. Have PlasmaVault call setAddManager after trove creation (if owner can call it)
-        // 3. Investigate if the Zapper contract can be configured to respect the addManager parameter
-        //
-        // For now, this test documents that setting addManager=msg.sender in the fuse
-        // does NOT work as expected because the Zapper overrides it.
-
-        console.log("ISSUE: Zapper is overriding addManager parameter!");
-        console.log("Expected AddManager (executor):", executorWallet);
-        console.log("Actual AddManager (Zapper):", addManager);
-
-        // Verify that executor CANNOT call setInterestIndividualDelegate when AddManager is Zapper
-        vm.expectRevert();
-        borrowerOpsFull.setInterestIndividualDelegate(
-            troveId,
-            delegateWallet,
-            5 * 1e15, // minInterestRate: 0.5%
-            50 * 1e16, // maxInterestRate: 50%
-            20 * 1e16, // newAnnualInterestRate: 20%
-            0, // upperHint
-            0, // lowerHint
-            5 * 1e18, // maxUpfrontFee
-            7 days // minInterestRateChangePeriod
-        );
-
-        // This test currently FAILS because the Zapper overrides addManager
-        // The test documents this limitation and suggests we need a different approach
-        assertEq(
-            addManager,
-            executorWallet,
-            "AddManager should be executor wallet, but Zapper is overriding it. Need to investigate Zapper contract behavior or use setAddManager after trove creation."
-        );
+        // Even though AddManager is not the delegate wallet, the delegate can still manage interest rates
+        _adjustInterestRate(borrowerOpsFull, troveId, 30 * 1e16);
     }
 
-    function _openTroveForTesting() internal returns (uint256 troveId, address troveOwner) {
+    function _openTroveForTesting(bool registerDelegate) internal returns (uint256 troveId, address troveOwner) {
         EbisuZapperCreateFuseEnterData memory enterData = EbisuZapperCreateFuseEnterData({
             zapper: SUSDE_ZAPPER,
             registry: SUSDE_REGISTRY,
@@ -407,14 +364,18 @@ contract EbisuInterestRateDelegateTest is Test {
             lowerHint: 0,
             flashLoanAmount: 1_000 * 1e18,
             annualInterestRate: 20 * 1e16,
-            maxUpfrontFee: 5 * 1e18
+            maxUpfrontFee: 5 * 1e18,
+            interestDelegate: registerDelegate ? delegateWallet : address(0),
+            delegateMinInterestRate: registerDelegate ? 5 * 1e15 : 0,
+            delegateMaxInterestRate: registerDelegate ? 50 * 1e16 : 0,
+            delegateMinInterestRateChangePeriod: registerDelegate ? 7 days : 0
         });
 
         FuseAction[] memory enterCalls = new FuseAction[](1);
         enterCalls[0] = FuseAction(
             address(zapperFuse),
             abi.encodeWithSignature(
-                "enter((address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256))",
+                "enter((address,address,uint256,uint256,uint256,uint256,uint256,uint256,uint256,address,uint256,uint256,uint256))",
                 enterData
             )
         );
@@ -462,25 +423,18 @@ contract EbisuInterestRateDelegateTest is Test {
         return IBorrowerOperationsFull(address(borrowerOps));
     }
 
-    function _setDelegate(IBorrowerOperationsFull borrowerOpsFull, uint256 troveId, address troveOwner) internal {
-        vm.prank(troveOwner);
-        borrowerOpsFull.setInterestIndividualDelegate(
-            troveId,
-            delegateWallet,
-            5 * 1e15, // minInterestRate: 0.5%
-            50 * 1e16, // maxInterestRate: 50%
-            20 * 1e16, // newAnnualInterestRate: 20%
-            0, // upperHint
-            0, // lowerHint
-            5 * 1e18, // maxUpfrontFee
-            7 days // minInterestRateChangePeriod
-        );
-    }
+    function _verifyDelegateSet(IBorrowerOperationsFull borrowerOpsFull, uint256 troveId) internal {
+        (
+            address account,
+            uint128 minInterestRate,
+            uint128 maxInterestRate,
+            uint256 minInterestRateChangePeriod
+        ) = borrowerOpsFull.getInterestIndividualDelegateOf(troveId);
 
-    function _verifyDelegateSet(IBorrowerOperationsFull borrowerOpsFull, uint256 troveId) internal view {
-        // Skip verification via getter (it may not be accessible)
-        // We'll verify the delegate is set by testing if it can adjust rates
-        // If delegate wasn't set correctly, adjustTroveInterestRate will revert
+        assertEq(account, delegateWallet, "Delegate wallet mismatch");
+        assertEq(uint256(minInterestRate), 5 * 1e15, "Delegate min interest rate mismatch");
+        assertEq(uint256(maxInterestRate), 50 * 1e16, "Delegate max interest rate mismatch");
+        assertEq(minInterestRateChangePeriod, 7 days, "Delegate min change period mismatch");
     }
 
     function _adjustInterestRate(IBorrowerOperationsFull borrowerOpsFull, uint256 troveId, uint256 newRate) internal {

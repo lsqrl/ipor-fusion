@@ -6,6 +6,7 @@ import {IFuseCommon} from "../IFuseCommon.sol";
 import {ILeverageZapper} from "./ext/ILeverageZapper.sol";
 import {IActivePool} from "./ext/IActivePool.sol";
 import {IAddressesRegistry} from "./ext/IAddressesRegistry.sol";
+import {IBorrowerOperations} from "./ext/IBorrowerOperations.sol";
 import {IPriceFeed} from "./ext/IPriceFeed.sol";
 import {LiquityMath} from "./ext/LiquityMath.sol";
 import {FuseStorageLib} from "../../libraries/FuseStorageLib.sol";
@@ -27,6 +28,10 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 /// @param flashLoanAmount the amount of flash loan requested for the leverage (0 amount -> no leverage)
 /// @param annualInterestRate the annual interest rate the Trove owner is willing to pay
 /// @param maxUpfrontFee the maximum upfront fee the Trove owner is willing to pay
+/// @param interestDelegate optional hot wallet that can manage interest rate updates after trove creation
+/// @param delegateMinInterestRate minimum annual rate the delegate can set (must respect protocol bounds)
+/// @param delegateMaxInterestRate maximum annual rate the delegate can set (must respect protocol bounds)
+/// @param delegateMinInterestRateChangePeriod cooldown the delegate must respect between rate updates
 struct EbisuZapperCreateFuseEnterData {
     address zapper;
     address registry;
@@ -37,6 +42,10 @@ struct EbisuZapperCreateFuseEnterData {
     uint256 flashLoanAmount;
     uint256 annualInterestRate;
     uint256 maxUpfrontFee;
+    address interestDelegate;
+    uint256 delegateMinInterestRate;
+    uint256 delegateMaxInterestRate;
+    uint256 delegateMinInterestRateChangePeriod;
 }
 
 /// @notice Data to close an open Trove through Zapper
@@ -75,6 +84,9 @@ contract EbisuZapperCreateFuse is IFuseCommon {
     error TroveNotOpen();
     error WethEthAdapterNotFound();
     error WethAddressNotValid();
+    error DelegateConfigInvalid();
+    error DelegateBoundsInvalid();
+    error DelegateInterestRateOverflow();
 
     event EbisuZapperCreateFuseEnter(
         address zapper,
@@ -121,6 +133,8 @@ contract EbisuZapperCreateFuse is IFuseCommon {
             )
         ) revert UnsupportedSubstrate();
 
+        IAddressesRegistry registry = IAddressesRegistry(data_.registry);
+
         if (
             data_.annualInterestRate < MIN_ANNUAL_INTEREST_RATE || data_.annualInterestRate > MAX_ANNUAL_INTEREST_RATE
         ) {
@@ -163,6 +177,8 @@ contract EbisuZapperCreateFuse is IFuseCommon {
 
         uint256 troveId = EbisuMathLib.calculateTroveId(adapter, address(this), data_.zapper, ownerIndex);
         troveDataStorage.troveIds[data_.zapper] = troveId;
+
+        _registerInterestDelegate(registry, data_, troveId);
 
         emit EbisuZapperCreateFuseEnter(
             data_.zapper,
@@ -272,6 +288,53 @@ contract EbisuZapperCreateFuse is IFuseCommon {
             adapterAddress = address(new WethEthAdapter(address(this), WETH));
             WethEthAdapterStorageLib.setWethEthAdapter(adapterAddress);
             emit WethEthAdapterCreated(adapterAddress, address(this), WETH);
+        }
+    }
+
+    function _registerInterestDelegate(
+        IAddressesRegistry registry,
+        EbisuZapperCreateFuseEnterData calldata data_,
+        uint256 troveId
+    ) internal {
+        if (data_.interestDelegate == address(0)) {
+            if (
+                data_.delegateMinInterestRate != 0 ||
+                data_.delegateMaxInterestRate != 0 ||
+                data_.delegateMinInterestRateChangePeriod != 0
+            ) {
+                revert DelegateConfigInvalid();
+            }
+            return;
+        }
+
+        _validateDelegateParams(data_);
+
+        IBorrowerOperations(registry.borrowerOperations()).setInterestIndividualDelegate(
+            troveId,
+            data_.interestDelegate,
+            uint128(data_.delegateMinInterestRate),
+            uint128(data_.delegateMaxInterestRate),
+            data_.annualInterestRate,
+            0,
+            0,
+            0,
+            data_.delegateMinInterestRateChangePeriod
+        );
+    }
+
+    function _validateDelegateParams(EbisuZapperCreateFuseEnterData calldata data_) internal pure {
+        if (
+            data_.delegateMinInterestRate == 0 ||
+            data_.delegateMaxInterestRate == 0 ||
+            data_.delegateMinInterestRate >= data_.delegateMaxInterestRate ||
+            data_.delegateMinInterestRate < MIN_ANNUAL_INTEREST_RATE ||
+            data_.delegateMaxInterestRate > MAX_ANNUAL_INTEREST_RATE
+        ) {
+            revert DelegateBoundsInvalid();
+        }
+
+        if (data_.delegateMinInterestRate > type(uint128).max || data_.delegateMaxInterestRate > type(uint128).max) {
+            revert DelegateInterestRateOverflow();
         }
     }
 }

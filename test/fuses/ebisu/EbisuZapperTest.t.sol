@@ -6,7 +6,7 @@ import {Test} from "forge-std/Test.sol";
 import {MarketSubstratesConfig, MarketBalanceFuseConfig, FeeConfig, FuseAction, PlasmaVault, PlasmaVaultInitData} from "../../../contracts/vaults/PlasmaVault.sol";
 
 import {EbisuZapperCreateFuse, EbisuZapperCreateFuseEnterData, EbisuZapperCreateFuseExitData} from "../../../contracts/fuses/ebisu/EbisuZapperCreateFuse.sol";
-import {EbisuSetDelegateFuse} from "../../../contracts/fuses/ebisu/EbisuSetDelegateFuse.sol";
+import {EbisuAdjustInterestRateFuse} from "../../../contracts/fuses/ebisu/EbisuAdjustInterestRateFuse.sol";
 
 import {EbisuZapperBalanceFuse} from "../../../contracts/fuses/ebisu/EbisuZapperBalanceFuse.sol";
 import {ITroveManager} from "../../../contracts/fuses/ebisu/ext/ITroveManager.sol";
@@ -87,7 +87,7 @@ contract EbisuZapperTest is Test {
     EbisuZapperBalanceFuse private balanceFuse;
     ERC20BalanceFuse private erc20BalanceFuse;
     UniversalTokenSwapperFuse private swapFuse;
-    EbisuSetDelegateFuse private setDelegateFuse;
+    EbisuAdjustInterestRateFuse private adjustRateFuse;
 
     address private accessManager;
     PriceOracleMiddleware private priceOracle;
@@ -692,59 +692,37 @@ contract EbisuZapperTest is Test {
         plasmaVault.execute(swapCalls);
     }
 
-    function testShouldSetDelegateViaFuse() public {
+    
+
+    function testShouldAdjustInterestRateViaFuse() public {
         testShouldEnterToEbisuZapper();
 
         address wethEthAdapter = wethEthAdapterAddressReader.getEbisuWethEthAdapterAddress(address(plasmaVault));
         uint256 troveId = EbisuMathLib.calculateTroveId(address(wethEthAdapter), address(plasmaVault), SUSDE_ZAPPER, 1);
 
-        EbisuSetDelegateFuse.EbisuSetDelegateFuseEnterData memory delegateData = EbisuSetDelegateFuse
-            .EbisuSetDelegateFuseEnterData({
+        uint256 newRate = 30 * 1e16; // 30%
+
+        EbisuAdjustInterestRateFuse.EbisuAdjustInterestRateFuseEnterData memory adjustData = EbisuAdjustInterestRateFuse
+            .EbisuAdjustInterestRateFuseEnterData({
                 zapper: SUSDE_ZAPPER,
                 registry: SUSDE_REGISTRY,
-                delegate: delegateWallet,
-                minInterestRate: uint128(DELEGATE_MIN_RATE),
-                maxInterestRate: uint128(DELEGATE_MAX_RATE),
-                minInterestRateChangePeriod: DELEGATE_MIN_CHANGE_PERIOD
+                newAnnualInterestRate: newRate,
+                maxUpfrontFee: 5 * 1e18,
+                upperHint: 0,
+                lowerHint: 0
             });
 
         FuseAction[] memory calls = new FuseAction[](1);
         calls[0] = FuseAction(
-            address(setDelegateFuse),
-            abi.encodeWithSelector(EbisuSetDelegateFuse.enter.selector, delegateData)
+            address(adjustRateFuse),
+            abi.encodeWithSelector(EbisuAdjustInterestRateFuse.enter.selector, adjustData)
         );
 
         plasmaVault.execute(calls);
 
-        (
-            address account,
-            uint128 minRate,
-            uint128 maxRate,
-            uint256 minChangePeriod
-        ) = IEbisuBorrowerOperationsHelperMinimal(IAddressesRegistry(SUSDE_REGISTRY).borrowerOperationsHelper())
-                .getInterestIndividualDelegateOf(troveId);
-
-        assertEq(account, delegateWallet, "Delegate wallet mismatch");
-        assertEq(uint256(minRate), DELEGATE_MIN_RATE, "Delegate min rate mismatch");
-        assertEq(uint256(maxRate), DELEGATE_MAX_RATE, "Delegate max rate mismatch");
-        assertEq(minChangePeriod, DELEGATE_MIN_CHANGE_PERIOD, "Delegate period mismatch");
-
-        vm.warp(block.timestamp + DELEGATE_MIN_CHANGE_PERIOD + 1);
-
-        IBorrowerOperations borrowerOps = IBorrowerOperations(IAddressesRegistry(SUSDE_REGISTRY).borrowerOperations());
-
-        vm.startPrank(delegateWallet);
-        vm.expectRevert();
-        borrowerOps.adjustTroveInterestRate(troveId, DELEGATE_MAX_RATE + 1, 0, 0, 5 * 1e18);
-        vm.stopPrank();
-
-        uint256 newRate = 25 * 1e16;
-        vm.prank(delegateWallet);
-        borrowerOps.adjustTroveInterestRate(troveId, newRate, 0, 0, 5 * 1e18);
-
         ITroveManager troveManager = ITroveManager(ILeverageZapper(SUSDE_ZAPPER).troveManager());
         ITroveManager.LatestTroveData memory troveData = troveManager.getLatestTroveData(troveId);
-        assertEq(troveData.annualInterestRate, newRate, "Delegate failed to adjust interest rate");
+        assertEq(troveData.annualInterestRate, newRate, "Interest rate was not updated by fuse");
     }
 
     // --- helpers ---
@@ -800,18 +778,20 @@ contract EbisuZapperTest is Test {
     function _setupFuses() private returns (address[] memory fuses) {
         zapperFuse = new EbisuZapperCreateFuse(IporFusionMarkets.EBISU, WETH); // OPEN + CLOSE
         leverModifyFuse = new EbisuZapperLeverModifyFuse(IporFusionMarkets.EBISU);
-        setDelegateFuse = new EbisuSetDelegateFuse(IporFusionMarkets.EBISU);
         swapFuse = new UniversalTokenSwapperFuse(
             IporFusionMarkets.UNIVERSAL_TOKEN_SWAPPER,
             address(new SwapExecutor()),
             1e18
         );
 
-        fuses = new address[](4);
+        adjustRateFuse = new EbisuAdjustInterestRateFuse(IporFusionMarkets.EBISU);
+
+        fuses = new address[](5);
         fuses[0] = address(zapperFuse);
         fuses[1] = address(leverModifyFuse);
         fuses[2] = address(setDelegateFuse);
-        fuses[3] = address(swapFuse);
+        fuses[3] = address(adjustRateFuse);
+        fuses[4] = address(swapFuse);
         return fuses;
     }
 

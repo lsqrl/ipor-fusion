@@ -12,8 +12,6 @@ import {EbisuZapperBalanceFuse} from "../../../contracts/fuses/ebisu/EbisuZapper
 import {ITroveManager} from "../../../contracts/fuses/ebisu/ext/ITroveManager.sol";
 import {ILeverageZapper} from "../../../contracts/fuses/ebisu/ext/ILeverageZapper.sol";
 import {EbisuMathLib} from "../../../contracts/fuses/ebisu/lib/EbisuMathLib.sol";
-import {IBorrowerOperations} from "../../../contracts/fuses/ebisu/ext/IBorrowerOperations.sol";
-import {IAddressesRegistry} from "../../../contracts/fuses/ebisu/ext/IAddressesRegistry.sol";
 import {PriceOracleMiddleware} from "../../../contracts/price_oracle/PriceOracleMiddleware.sol";
 import {ERC20BalanceFuse} from "../../../contracts/fuses/erc20/Erc20BalanceFuse.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
@@ -96,11 +94,6 @@ contract EbisuZapperTest is Test {
     // ETH gas compensation constant from zapper (keep in sync with fuse)
     uint256 private constant ETH_GAS_COMPENSATION = 0.0375 ether;
 
-    address private delegateWallet;
-    uint256 private constant DELEGATE_MIN_RATE = 5 * 1e15; // 0.5%
-    uint256 private constant DELEGATE_MAX_RATE = 50 * 1e16; // 50%
-    uint256 private constant DELEGATE_MIN_CHANGE_PERIOD = 7 days;
-
     MockDex private mockDex;
 
     receive() external payable {}
@@ -155,7 +148,6 @@ contract EbisuZapperTest is Test {
         deal(SUSDE, address(mockDex), 1e9 * 1e18);
         // deal 1_000_000_000 ebUSD to mockDex
         deal(EBUSD, address(mockDex), 1e9 * 1e18);
-        delegateWallet = makeAddr("delegateWallet");
         // setup plasma vault
         PlasmaVaultConfigurator.setupPlasmaVault(
             vm,
@@ -692,8 +684,6 @@ contract EbisuZapperTest is Test {
         plasmaVault.execute(swapCalls);
     }
 
-    
-
     function testShouldAdjustInterestRateViaFuse() public {
         testShouldEnterToEbisuZapper();
 
@@ -786,12 +776,11 @@ contract EbisuZapperTest is Test {
 
         adjustRateFuse = new EbisuAdjustInterestRateFuse(IporFusionMarkets.EBISU);
 
-        fuses = new address[](5);
+        fuses = new address[](4);
         fuses[0] = address(zapperFuse);
         fuses[1] = address(leverModifyFuse);
-        fuses[2] = address(setDelegateFuse);
-        fuses[3] = address(adjustRateFuse);
-        fuses[4] = address(swapFuse);
+        fuses[2] = address(adjustRateFuse);
+        fuses[3] = address(swapFuse);
         return fuses;
     }
 

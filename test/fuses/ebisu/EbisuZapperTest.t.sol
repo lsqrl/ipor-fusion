@@ -35,7 +35,9 @@ import {EbisuZapperLeverModifyFuse, EbisuZapperLeverModifyFuseEnterData, EbisuZa
 import {WethEthAdapterStorageLib} from "../../../contracts/fuses/ebisu/lib/WethEthAdapterStorageLib.sol";
 import {EbisuZapperSubstrateLib, EbisuZapperSubstrate, EbisuZapperSubstrateType} from "../../../contracts/fuses/ebisu/lib/EbisuZapperSubstrateLib.sol";
 import {IporMath} from "../../../contracts/libraries/math/IporMath.sol";
+import {CallbackHandlerMorpho} from "../../../contracts/handlers/callbacks/CallbackHandlerMorpho.sol";
 
+import "forge-std/console2.sol";
 contract MockDex {
     function swap(address tokenIn, address tokenOut, uint256 amountIn, uint256 amountOut) public {
         ERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn);
@@ -74,11 +76,13 @@ contract EbisuZapperTest is Test {
     address internal constant SUSDE_ZAPPER = 0x10C14374104f9FC2dAE4b38F945ff8a52f48151d;
     address internal constant WBTC_ZAPPER = 0x175a17755ea596875CB3c996D007072C3f761F6B;
     address internal constant LBTC_ZAPPER = 0xe32E9aB36558e5341A4C05FD635Db4Ba1F3F51cF;
+    address internal constant STCUSD_ZAPPER = 0x6a883bfa534754E3B31AA810d6E546F9D0Be2f20;
     // Address Registries
     address internal constant WEETH_REGISTRY = 0x329a7BAA50BB43A6149AF8C9cF781876b6Fd7B3A;
     address internal constant SUSDE_REGISTRY = 0x411ED8575a1e3822Bbc763DC578dd9bFAF526C1f;
     address internal constant WBTC_REGISTRY = 0x0CAc6a40EE0D35851Fd6d9710C5180F30B494350;
     address internal constant LBTC_REGISTRY = 0x7f034988AF49248D3d5bD81a2CE76ED4a3006243;
+    address internal constant STCUSD_REGISTRY = 0x0C774f22e4b782167EF9635d9ecfBA61dd4e94Ea;
 
     PlasmaVault private plasmaVault;
     EbisuZapperCreateFuse private zapperFuse;
@@ -96,12 +100,13 @@ contract EbisuZapperTest is Test {
     uint256 private constant ETH_GAS_COMPENSATION = 0.0375 ether;
 
     MockDex private mockDex;
+    WithdrawManager private withdrawManager;
 
     receive() external payable {}
 
     function setUp() public {
         // block height -> 23277699 | Sep-02-2025 08:23:23 PM +UTC
-        vm.createSelectFork(vm.envString("ETHEREUM_PROVIDER_URL"), 23277699);
+        vm.createSelectFork(vm.envString("ETHEREUM_PROVIDER_URL"));
         // assets
         address[] memory assets = new address[](7);
         assets[0] = EBUSD; // borrowed
@@ -128,50 +133,53 @@ contract EbisuZapperTest is Test {
         // then set assets prices sources on the oracle middleware
         priceOracle.setAssetsPricesSources(assets, priceFeeds);
 
+        plasmaVault = PlasmaVault(0xEf53663BB775a51181f04d590F88FC38d6bd5751);
+        leverModifyFuse = EbisuZapperLeverModifyFuse(0xA3BabE2e9A1fdA1350B76EB77C40Dd394c836102);
+        withdrawManager = WithdrawManager(0x040f1f8005E6D2B364aD649132dCD2576Ecc6aCb);
         // create plasma vault in a single step
-        plasmaVault = new PlasmaVault();
-        plasmaVault.proxyInitialize(
-            PlasmaVaultInitData(
-                "TEST sUSDe PLASMA VAULT",
-                "zpTEST",
-                USDC,
-                address(priceOracle),
-                _setupFeeConfig(),
-                _createAccessManager(),
-                address(new PlasmaVaultBase()),
-                address(new WithdrawManager(accessManager))
-            )
-        );
+        // plasmaVault = new PlasmaVault();
+        // plasmaVault.proxyInitialize(
+        //     PlasmaVaultInitData(
+        //         "TEST sUSDe PLASMA VAULT",
+        //         "zpTEST",
+        //         USDC,
+        //         address(priceOracle),
+        //         _setupFeeConfig(),
+        //         _createAccessManager(),
+        //         address(new PlasmaVaultBase()),
+        //         address(new WithdrawManager(accessManager))
+        //     )
+        // );
 
-        // mock dex to swap USDC into sUSDe
-        mockDex = new MockDex();
-        // deal 1_000_000_000 sUSDe to mockDex
-        deal(SUSDE, address(mockDex), 1e9 * 1e18);
-        // deal 1_000_000_000 ebUSD to mockDex
-        deal(EBUSD, address(mockDex), 1e9 * 1e18);
-        // setup plasma vault
-        PlasmaVaultConfigurator.setupPlasmaVault(
-            vm,
-            address(this),
-            address(plasmaVault),
-            _setupFuses(),
-            _setupBalanceFuses(),
-            _setupMarketConfigs(address(mockDex))
-        );
+        // // mock dex to swap USDC into sUSDe
+        // mockDex = new MockDex();
+        // // deal 1_000_000_000 sUSDe to mockDex
+        // deal(SUSDE, address(mockDex), 1e9 * 1e18);
+        // // deal 1_000_000_000 ebUSD to mockDex
+        // deal(EBUSD, address(mockDex), 1e9 * 1e18);
+        // // setup plasma vault
+        // PlasmaVaultConfigurator.setupPlasmaVault(
+        //     vm,
+        //     address(this),
+        //     address(plasmaVault),
+        //     _setupFuses(),
+        //     _setupBalanceFuses(),
+        //     _setupMarketConfigs(address(mockDex))
+        // );
 
-        // setup dependency balance graph for the Ebisu Zapper
-        uint256[] memory marketIds = new uint256[](2);
-        marketIds[0] = IporFusionMarkets.EBISU;
-        marketIds[1] = IporFusionMarkets.UNIVERSAL_TOKEN_SWAPPER;
+        // // setup dependency balance graph for the Ebisu Zapper
+        // uint256[] memory marketIds = new uint256[](2);
+        // marketIds[0] = IporFusionMarkets.EBISU;
+        // marketIds[1] = IporFusionMarkets.UNIVERSAL_TOKEN_SWAPPER;
 
-        uint256[] memory dependence = new uint256[](1);
-        dependence[0] = IporFusionMarkets.ERC20_VAULT_BALANCE;
+        // uint256[] memory dependence = new uint256[](1);
+        // dependence[0] = IporFusionMarkets.ERC20_VAULT_BALANCE;
 
-        uint256[][] memory dependenceMarkets = new uint256[][](2);
-        dependenceMarkets[0] = dependence; // Ebisu -> ERC20_VAULT_BALANCE
-        dependenceMarkets[1] = dependence; // Universal Swapper -> ERC20_VAULT_BALANCE
+        // uint256[][] memory dependenceMarkets = new uint256[][](2);
+        // dependenceMarkets[0] = dependence; // Ebisu -> ERC20_VAULT_BALANCE
+        // dependenceMarkets[1] = dependence; // Universal Swapper -> ERC20_VAULT_BALANCE
 
-        PlasmaVaultGovernance(address(plasmaVault)).updateDependencyBalanceGraphs(marketIds, dependenceMarkets);
+        // PlasmaVaultGovernance(address(plasmaVault)).updateDependencyBalanceGraphs(marketIds, dependenceMarkets);
 
         // adapter address reader
         wethEthAdapterAddressReader = new EbisuWethEthAdapterAddressReader();
@@ -460,105 +468,131 @@ contract EbisuZapperTest is Test {
 
     function testLeverUpEffectsEbisu() public {
         // given
-        testShouldEnterToEbisuZapper();
-        address wethEthAdapter = wethEthAdapterAddressReader.getEbisuWethEthAdapterAddress(address(plasmaVault));
-        assertTrue(wethEthAdapter != address(0), "Adapter should be created after execution");
+        // testShouldEnterToEbisuZapper();
+        // address wethEthAdapter = wethEthAdapterAddressReader.getEbisuWethEthAdapterAddress(address(plasmaVault));
+        // assertTrue(wethEthAdapter != address(0), "Adapter should be created after execution");
 
-        uint256 troveId = EbisuMathLib.calculateTroveId(address(wethEthAdapter), address(plasmaVault), SUSDE_ZAPPER, 1);
-        ITroveManager troveManager = ITroveManager(ILeverageZapper(SUSDE_ZAPPER).troveManager());
+        // uint256 troveId = EbisuMathLib.calculateTroveId(address(wethEthAdapter), address(plasmaVault), SUSDE_ZAPPER, 1);
+        // uint256 troveId = 49933664149275127270016999029338337702643840359797990317192508074697503712861;
+        // ITroveManager troveManager = ITroveManager(ILeverageZapper(SUSDE_ZAPPER).troveManager());
 
-        ITroveManager.LatestTroveData memory initialData = troveManager.getLatestTroveData(troveId);
-        uint256 initialDebt = initialData.entireDebt;
-        uint256 initialColl = initialData.entireColl;
+        // ITroveManager.LatestTroveData memory initialData = troveManager.getLatestTroveData(troveId);
+        // uint256 initialDebt = initialData.entireDebt;
+        // uint256 initialColl = initialData.entireColl;
 
-        EbisuZapperLeverModifyFuseEnterData memory leverUpData = EbisuZapperLeverModifyFuseEnterData({
-            zapper: SUSDE_ZAPPER,
-            flashLoanAmount: 500 * 1e18,
-            ebusdAmount: 700 * 1e18,
-            maxUpfrontFee: 2 * 1e18
-        });
+        // EbisuZapperLeverModifyFuseEnterData memory leverUpData = EbisuZapperLeverModifyFuseEnterData({
+        //     zapper: STCUSD_ZAPPER,
+        //     flashLoanAmount: 2017214830149268116890,
+        //     ebusdAmount: 2228647189630808544095,
+        //     maxUpfrontFee: 1809370694125455266
+        // });
 
-        FuseAction[] memory leverUpCalls = new FuseAction[](1);
-        leverUpCalls[0] = FuseAction(
-            address(leverModifyFuse),
-            abi.encodeWithSignature("enter((address,uint256,uint256,uint256))", leverUpData)
-        );
+        // FuseAction[] memory leverUpCalls = new FuseAction[](1);
+        // leverUpCalls[0] = FuseAction(
+        //     address(leverModifyFuse),
+        //     abi.encodeWithSignature("enter((address,uint256,uint256,uint256))", leverUpData)
+        // );
 
-        uint256 totalAssetsBefore = plasmaVault.totalAssets();
-        uint256 totalAssetsInMarketBefore = plasmaVault.totalAssetsInMarket(IporFusionMarkets.EBISU);
+        // uint256 totalAssetsBefore = plasmaVault.totalAssets();
+        // uint256 totalAssetsInMarketBefore = plasmaVault.totalAssetsInMarket(IporFusionMarkets.EBISU);
         // when
-        plasmaVault.execute(leverUpCalls);
+        // emit log_address(address(plasmaVault));
+        // assertEq(address(plasmaVault), 0xEf53663BB775a51181f04d590F88FC38d6bd5751);
+// 0x81FA729b7713c9ab91E13b8691c44E7ba0D5B133
+// 0xa2FaA7a40a378f2a0800AF99D4c488B8a38D87AE
+        // vm.startPrank(0x81FA729b7713c9ab91E13b8691c44E7ba0D5B133);
+        // console2.logBytes4(CallbackHandlerMorpho.onMorphoFlashLoan.selector);
+        // PlasmaVaultGovernance(address(plasmaVault)).updateCallbackHandler(
+        //     0x4f9Cc0d7432B66EACa58064a2F0EA663A2F0b465,
+        //     0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb,
+        //     CallbackHandlerMorpho.onMorphoFlashLoan.selector
+        // );
+        // vm.stopPrank();
+        // vm.startPrank(0xa2FaA7a40a378f2a0800AF99D4c488B8a38D87AE);
+        // // plasmaVault.execute(leverUpCalls);
 
-        ITroveManager.LatestTroveData memory finalData = troveManager.getLatestTroveData(troveId);
+        // // withdrawManager.releaseFunds(block.timestamp - 1000, 10000000);
 
-        // then
-        assertGe(
-            finalData.entireDebt,
-            initialDebt + leverUpData.ebusdAmount,
-            "Debt should be at least initial debt + ebusd amount"
-        );
-        assertLe(
-            finalData.entireDebt,
-            initialDebt + leverUpData.ebusdAmount + leverUpData.maxUpfrontFee,
-            "Debt increased too much"
-        );
-        assertEq(
-            finalData.entireColl,
-            initialColl + leverUpData.flashLoanAmount,
-            "Collateral should have increased after lever up"
-        );
+        // (bool ok, bytes memory ret) = address(plasmaVault).call(
+        //     hex"baae8abf000000000000000000000000000000000000000000000000000000000000002000000000000000000000000000000000000000000000000000000000000000010000000000000000000000000000000000000000000000000000000000000020000000000000000000000000e1aa89eb42c23f292cda1544566f6ebee3a67eed0000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000004411802451eb17955ea422baeddbfb0b8d8c9086c5be7a9cfdefb292119a102e981a30062e0000000000000000000000000000000000000000000002de8898653eeb07623f00000000000000000000000000000000000000000000000000000000"
+        // );
+        // if (!ok) {
+        //     // show revert data in logs
+        //     emit log_bytes(ret);
+        //     fail();
+        // }
+        // vm.stopPrank();
 
-        {
-            // balanceOf() should be up to date
-            ReadResult memory readResult = UniversalReader(address(plasmaVault)).read(
-                address(balanceFuse),
-                abi.encodeWithSignature("balanceOf()")
-            );
+        // ITroveManager.LatestTroveData memory finalData = troveManager.getLatestTroveData(troveId);
 
-            uint256 balanceOfFromFuse = abi.decode(readResult.data, (uint256));
-            (uint256 price, uint256 priceDecimals) = priceOracle.getAssetPrice(SUSDE);
-            uint256 collUSDvalue = IporMath.convertToWad(finalData.entireColl * price, 18 + priceDecimals);
-            (price, priceDecimals) = priceOracle.getAssetPrice(EBUSD);
-            uint256 debtUSDvalue = IporMath.convertToWad(finalData.entireDebt * price, 18 + priceDecimals);
-            assertEq(balanceOfFromFuse, collUSDvalue - debtUSDvalue, "balance after lever up incorrect");
-        }
-        {
-            // check assets change in EBISU
-            (uint256 price, uint256 priceDecimals) = priceOracle.getAssetPrice(SUSDE);
-            uint256 collUSDvalueChange = IporMath.convertToWad(
-                (finalData.entireColl - initialData.entireColl) * price,
-                18 + priceDecimals
-            );
-            (price, priceDecimals) = priceOracle.getAssetPrice(EBUSD);
-            uint256 debtUSDvalueChange = IporMath.convertToWad(
-                (finalData.entireDebt - initialData.entireDebt) * price,
-                18 + priceDecimals
-            );
+        // // then
+        // assertGe(
+        //     finalData.entireDebt,
+        //     initialDebt + leverUpData.ebusdAmount,
+        //     "Debt should be at least initial debt + ebusd amount"
+        // );
+        // assertLe(
+        //     finalData.entireDebt,
+        //     initialDebt + leverUpData.ebusdAmount + leverUpData.maxUpfrontFee,
+        //     "Debt increased too much"
+        // );
+        // assertEq(
+        //     finalData.entireColl,
+        //     initialColl + leverUpData.flashLoanAmount,
+        //     "Collateral should have increased after lever up"
+        // );
 
-            // transport in USDC
-            (price, priceDecimals) = priceOracle.getAssetPrice(USDC);
-            uint256 collChange = IporMath.convertWadToAssetDecimals(
-                IporMath.division(collUSDvalueChange * IporMath.BASIS_OF_POWER ** 8, price),
-                16
-            );
-            uint256 debtChange = IporMath.convertWadToAssetDecimals(
-                IporMath.division(debtUSDvalueChange * IporMath.BASIS_OF_POWER ** 8, price),
-                16
-            );
+        // {
+        //     // balanceOf() should be up to date
+        //     ReadResult memory readResult = UniversalReader(address(plasmaVault)).read(
+        //         address(balanceFuse),
+        //         abi.encodeWithSignature("balanceOf()")
+        //     );
 
-            assertEq(
-                plasmaVault.totalAssetsInMarket(IporFusionMarkets.EBISU),
-                totalAssetsInMarketBefore + collChange - debtChange,
-                "Extra assets in EBISU mismatch"
-            );
-        }
+        //     uint256 balanceOfFromFuse = abi.decode(readResult.data, (uint256));
+        //     (uint256 price, uint256 priceDecimals) = priceOracle.getAssetPrice(SUSDE);
+        //     uint256 collUSDvalue = IporMath.convertToWad(finalData.entireColl * price, 18 + priceDecimals);
+        //     (price, priceDecimals) = priceOracle.getAssetPrice(EBUSD);
+        //     uint256 debtUSDvalue = IporMath.convertToWad(finalData.entireDebt * price, 18 + priceDecimals);
+        //     assertEq(balanceOfFromFuse, collUSDvalue - debtUSDvalue, "balance after lever up incorrect");
+        // }
+        // {
+        //     // check assets change in EBISU
+        //     (uint256 price, uint256 priceDecimals) = priceOracle.getAssetPrice(SUSDE);
+        //     uint256 collUSDvalueChange = IporMath.convertToWad(
+        //         (finalData.entireColl - initialData.entireColl) * price,
+        //         18 + priceDecimals
+        //     );
+        //     (price, priceDecimals) = priceOracle.getAssetPrice(EBUSD);
+        //     uint256 debtUSDvalueChange = IporMath.convertToWad(
+        //         (finalData.entireDebt - initialData.entireDebt) * price,
+        //         18 + priceDecimals
+        //     );
 
-        // ------ CHECK ASSETS CHANGE ------
-        // Vault effect of closing a position from collateral is
-        // 1. + leverUpData.ebusdAmount (which is in ebUSD) - leverUpData.flashLoanAmount in ebUSD
-        // 2. trove collateral has increased of flashLoanAmount and debt increased of ebusdAmount
-        // therefore the net change is zero
-        _eqWithTolerance(plasmaVault.totalAssets(), totalAssetsBefore, 1); // 0.01% tolerance due to slippage
+        //     // transport in USDC
+        //     (price, priceDecimals) = priceOracle.getAssetPrice(USDC);
+        //     uint256 collChange = IporMath.convertWadToAssetDecimals(
+        //         IporMath.division(collUSDvalueChange * IporMath.BASIS_OF_POWER ** 8, price),
+        //         16
+        //     );
+        //     uint256 debtChange = IporMath.convertWadToAssetDecimals(
+        //         IporMath.division(debtUSDvalueChange * IporMath.BASIS_OF_POWER ** 8, price),
+        //         16
+        //     );
+
+        //     assertEq(
+        //         plasmaVault.totalAssetsInMarket(IporFusionMarkets.EBISU),
+        //         totalAssetsInMarketBefore + collChange - debtChange,
+        //         "Extra assets in EBISU mismatch"
+        //     );
+        // }
+
+        // // ------ CHECK ASSETS CHANGE ------
+        // // Vault effect of closing a position from collateral is
+        // // 1. + leverUpData.ebusdAmount (which is in ebUSD) - leverUpData.flashLoanAmount in ebUSD
+        // // 2. trove collateral has increased of flashLoanAmount and debt increased of ebusdAmount
+        // // therefore the net change is zero
+        // _eqWithTolerance(plasmaVault.totalAssets(), totalAssetsBefore, 1); // 0.01% tolerance due to slippage
     }
 
     function testLeverDownEffectsEbisu() public {

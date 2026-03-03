@@ -1,0 +1,201 @@
+// SPDX-License-Identifier: UNLICENSED
+pragma solidity 0.8.30;
+
+import {Test} from "forge-std/Test.sol";
+import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
+import {ERC1967Proxy} from "@openzeppelin/contracts/proxy/ERC1967/ERC1967Proxy.sol";
+import {MarketSubstratesConfig, MarketBalanceFuseConfig, FeeConfig} from "../../../contracts/vaults/PlasmaVault.sol";
+import {FuseAction, PlasmaVault, PlasmaVaultInitData} from "../../../contracts/vaults/PlasmaVault.sol";
+import {IporFusionMarkets} from "../../../contracts/libraries/IporFusionMarkets.sol";
+
+import {RoleLib, UsersToRoles} from "../../RoleLib.sol";
+
+import {PriceOracleMiddleware} from "../../../contracts/price_oracle/PriceOracleMiddleware.sol";
+import {PlasmaVaultBase} from "../../../contracts/vaults/PlasmaVaultBase.sol";
+import {IporFusionAccessManager} from "../../../contracts/managers/access/IporFusionAccessManager.sol";
+import {ZeroBalanceFuse} from "../../../contracts/fuses/ZeroBalanceFuse.sol";
+
+import {
+    PermissionedUniversalSwapperFuse,
+    PermissionedUniversalSwapperEnterData,
+    PermissionedUniversalSwapperData
+} from "../../../contracts/fuses/universal_token_swapper/PermissionedUniversalSwapperFuse.sol";
+import {UniversalTokenSwapperSubstrateLib} from "../../../contracts/fuses/universal_token_swapper/UniversalTokenSwapperSubstrateLib.sol";
+import {MockDexActionEthereum} from "./MockDexActionEthereum.sol";
+
+import {FeeConfigHelper} from "../../test_helpers/FeeConfigHelper.sol";
+import {WithdrawManager} from "../../../contracts/managers/withdraw/WithdrawManager.sol";
+import {PlasmaVaultConfigurator} from "../../utils/PlasmaVaultConfigurator.sol";
+
+contract PermissionedUniversalSwapperFuseTest is Test {
+    using SafeERC20 for ERC20;
+
+    address private constant USDC = 0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48;
+    address private constant USDT = 0xdAC17F958D2ee523a2206206994597C13D831ec7;
+    address private constant DAI = 0x6B175474E89094C44Da98b954EedeAC495271d0F;
+
+    address private _mockDexActionEthereum;
+
+    address private _plasmaVault;
+    address private _priceOracle;
+    address private _accessManager;
+    address private _withdrawManager;
+    address private _swapExecutor;
+
+    PermissionedUniversalSwapperFuse private _permissionedSwapperFuse;
+
+    function setUp() public {
+        vm.createSelectFork(vm.envString("ETHEREUM_PROVIDER_URL"), 20590113);
+
+        // price oracle
+        PriceOracleMiddleware implementation = new PriceOracleMiddleware(0x47Fb2585D2C56Fe188D0E6ec628a38b74fCeeeDf);
+        _priceOracle = address(
+            new ERC1967Proxy(address(implementation), abi.encodeWithSignature("initialize(address)", address(this)))
+        );
+
+        _mockDexActionEthereum = address(new MockDexActionEthereum());
+
+        // Pre-fund mock DEX with USDC for swap simulations
+        vm.prank(0xDa9CE944a37d218c3302F6B82a094844C6ECEb17); // USDC whale
+        ERC20(USDC).transfer(_mockDexActionEthereum, 10_000e6);
+
+        _withdrawManager = address(new WithdrawManager(address(_accessManager)));
+
+        // plasma vault
+        _plasmaVault = address(new PlasmaVault());
+        PlasmaVault(_plasmaVault).proxyInitialize(
+            PlasmaVaultInitData(
+                "TEST PLASMA VAULT",
+                "pvUSDC",
+                USDC,
+                _priceOracle,
+                _setupFeeConfig(),
+                _createAccessManager(),
+                address(new PlasmaVaultBase()),
+                _withdrawManager,
+                address(0)
+            )
+        );
+        PlasmaVaultConfigurator.setupPlasmaVault(
+            vm,
+            address(this),
+            address(_plasmaVault),
+            _setupFuses(),
+            _setupBalanceFuses(),
+            _setupMarketConfigs()
+        );
+        _setupRoles();
+    }
+
+    function testShouldRevertWhenCalledDirectly() external {
+        PermissionedUniversalSwapperEnterData memory enterData = PermissionedUniversalSwapperEnterData({
+            tokenIn: USDC,
+            tokenOut: USDT,
+            amountIn: 1,
+            minAmountOut: 0,
+            data: PermissionedUniversalSwapperData({targets: new address[](0), data: new bytes[](0)})
+        });
+
+        vm.expectRevert(abi.encodeWithSignature("PermissionedUniversalSwapperFuseOnlyPlasmaVault()"));
+        _permissionedSwapperFuse.enter(enterData);
+    }
+
+    function testShouldExecuteViaPlasmaVault() external {
+        address userOne = address(0x1222);
+        uint256 depositAmount = 1_000e6;
+
+        vm.prank(0xDa9CE944a37d218c3302F6B82a094844C6ECEb17);
+        ERC20(USDC).transfer(userOne, 10_000e6);
+
+        vm.prank(userOne);
+        ERC20(USDC).approve(_plasmaVault, depositAmount);
+        vm.prank(userOne);
+        PlasmaVault(_plasmaVault).deposit(depositAmount, userOne);
+
+        address[] memory targets = new address[](1);
+        targets[0] = _mockDexActionEthereum;
+
+        bytes[] memory data = new bytes[](1);
+        data[0] = abi.encodeWithSignature("returnExtra1000Usdc(address)", _swapExecutor);
+
+        PermissionedUniversalSwapperEnterData memory enterData = PermissionedUniversalSwapperEnterData({
+            tokenIn: USDC,
+            tokenOut: USDT,
+            amountIn: depositAmount,
+            minAmountOut: 0,
+            data: PermissionedUniversalSwapperData({targets: targets, data: data})
+        });
+
+        FuseAction[] memory enterCalls = new FuseAction[](1);
+        enterCalls[0] = FuseAction(
+            address(_permissionedSwapperFuse),
+            abi.encodeWithSignature("enter((address,address,uint256,uint256,(address[],bytes[])))", enterData)
+        );
+
+        uint256 plasmaVaultUsdcBalanceBefore = ERC20(USDC).balanceOf(_plasmaVault);
+
+        PlasmaVault(_plasmaVault).execute(enterCalls);
+
+        uint256 plasmaVaultUsdcBalanceAfter = ERC20(USDC).balanceOf(_plasmaVault);
+
+        assertEq(plasmaVaultUsdcBalanceBefore, 1_000e6, "plasmaVaultUsdcBalanceBefore");
+        assertEq(plasmaVaultUsdcBalanceAfter, 2_000e6, "plasmaVaultUsdcBalanceAfter");
+    }
+
+    function _setupFeeConfig() private returns (FeeConfig memory feeConfig_) {
+        feeConfig_ = FeeConfigHelper.createZeroFeeConfig();
+    }
+
+    function _createAccessManager() private returns (address accessManager_) {
+        UsersToRoles memory usersToRoles;
+        usersToRoles.superAdmin = address(this);
+        usersToRoles.atomist = address(this);
+        address[] memory alphas = new address[](1);
+        alphas[0] = address(this);
+        usersToRoles.alphas = alphas;
+        accessManager_ = address(RoleLib.createAccessManager(usersToRoles, 0, vm));
+        _accessManager = accessManager_;
+    }
+
+    function _setupRoles() private {
+        UsersToRoles memory usersToRoles;
+        usersToRoles.superAdmin = address(this);
+        usersToRoles.atomist = address(this);
+        RoleLib.setupPlasmaVaultRoles(
+            usersToRoles,
+            vm,
+            _plasmaVault,
+            IporFusionAccessManager(_accessManager),
+            _withdrawManager
+        );
+    }
+
+    function _setupMarketConfigs() private returns (MarketSubstratesConfig[] memory marketConfigs_) {
+        marketConfigs_ = new MarketSubstratesConfig[](1);
+
+        bytes32[] memory universalSwapSubstrates = new bytes32[](5);
+        universalSwapSubstrates[0] = UniversalTokenSwapperSubstrateLib.encodeTokenSubstrate(USDC);
+        universalSwapSubstrates[1] = UniversalTokenSwapperSubstrateLib.encodeTokenSubstrate(USDT);
+        universalSwapSubstrates[2] = UniversalTokenSwapperSubstrateLib.encodeTokenSubstrate(DAI);
+        universalSwapSubstrates[3] = UniversalTokenSwapperSubstrateLib.encodeTargetSubstrate(_mockDexActionEthereum);
+        universalSwapSubstrates[4] = UniversalTokenSwapperSubstrateLib.encodeTargetSubstrate(USDC);
+
+        marketConfigs_[0] = MarketSubstratesConfig(IporFusionMarkets.UNIVERSAL_TOKEN_SWAPPER, universalSwapSubstrates);
+    }
+
+    function _setupFuses() private returns (address[] memory fuses_) {
+        _permissionedSwapperFuse = new PermissionedUniversalSwapperFuse(IporFusionMarkets.UNIVERSAL_TOKEN_SWAPPER);
+        _swapExecutor = _permissionedSwapperFuse.EXECUTOR();
+
+        fuses_ = new address[](1);
+        fuses_[0] = address(_permissionedSwapperFuse);
+    }
+
+    function _setupBalanceFuses() private returns (MarketBalanceFuseConfig[] memory balanceFuses_) {
+        ZeroBalanceFuse zeroBalance = new ZeroBalanceFuse(IporFusionMarkets.UNIVERSAL_TOKEN_SWAPPER);
+
+        balanceFuses_ = new MarketBalanceFuseConfig[](1);
+        balanceFuses_[0] = MarketBalanceFuseConfig(IporFusionMarkets.UNIVERSAL_TOKEN_SWAPPER, address(zeroBalance));
+    }
+}
